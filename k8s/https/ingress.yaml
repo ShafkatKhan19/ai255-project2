@@ -1,0 +1,77 @@
+# HTTPS entry point. Applied by deploy.ps1 only when -Domain is given.
+#
+#   browser --HTTPS--> Google HTTPS load balancer --HTTP--> web pods
+#
+# The load balancer holds the certificate and decrypts the traffic.
+
+# A second Service for the web pods, used by the HTTPS load balancer.
+# The NEG annotation lets the load balancer send traffic straight to the
+# pods instead of going through a node first.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-https
+  namespace: snip
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "web"}'
+spec:
+  type: ClusterIP
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# The load balancer's own health check uses the same readiness endpoint
+# as Kubernetes does.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: web
+  namespace: snip
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: /readyz
+    port: 8080
+    checkIntervalSec: 10
+    timeoutSec: 3
+---
+# Google issues and renews the certificate for this name by itself, once
+# the name's DNS record points at the load balancer.
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: snip-cert
+  namespace: snip
+spec:
+  domains:
+    - __DOMAIN__
+---
+# Anyone arriving over plain HTTP is redirected to HTTPS.
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: snip-frontend
+  namespace: snip
+spec:
+  redirectToHttps:
+    enabled: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: snip
+  namespace: snip
+  annotations:
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: snip-ip
+    networking.gke.io/managed-certificates: snip-cert
+    networking.gke.io/v1beta1.FrontendConfig: snip-frontend
+spec:
+  defaultBackend:
+    service:
+      name: web-https
+      port:
+        number: 80

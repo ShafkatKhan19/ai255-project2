@@ -15,12 +15,12 @@ Shafkat Khalek Khan. AI 255 Cloud Computing Concepts, Fall 2026. The written rep
 ## What is in this repository
 
 ```
-services/web      app.py, static/index.html, Dockerfile, requirements.txt
+services/web      app.py, static/ (index.html, style.css, app.js), Dockerfile, requirements.txt
 services/links    app.py, store.py, Dockerfile, requirements.txt
 services/stats    app.py, store.py, Dockerfile, requirements.txt
 k8s/              Namespace, service accounts, and per service:
                   Deployment + Service + HorizontalPodAutoscaler + PodDisruptionBudget;
-                  plus one NetworkPolicy
+                  plus one NetworkPolicy; https/ has the HTTPS load balancer
 scripts/          deploy.ps1, experiments.ps1, evidence.ps1, teardown.ps1,
                   smoke_test.py, load_test.py, availability.py, build_report.py
 evidence/         output captured from the live cluster (used in the report)
@@ -37,7 +37,7 @@ py -m venv .venv
 .venv\Scripts\python -m pytest tests
 ```
 
-30 tests. They never touch Google Cloud: most use an in-memory store, and the datastore-outage tests point the real Firestore client at an address where nothing is listening. GitHub Actions runs them on every push (`.github/workflows/tests.yml`).
+36 tests. They never touch Google Cloud: most use an in-memory store, and the datastore-outage tests point the real Firestore client at an address where nothing is listening. GitHub Actions runs them on every push (`.github/workflows/tests.yml`).
 
 ## Run it locally (needs Docker Desktop)
 
@@ -67,6 +67,16 @@ Add `-UseCloudBuild` to build the images in Google Cloud instead of with Docker 
 ```powershell
 py scripts\smoke_test.py http://ADDRESS
 ```
+
+### HTTPS
+
+```powershell
+.\scripts\deploy.ps1 -ProjectId YOUR_PROJECT_ID -Domain snip.example.com -DnsZone YOUR_CLOUD_DNS_ZONE
+```
+
+This reserves a fixed address, points the DNS name at it, and adds a Google HTTPS load balancer with a Google-managed certificate in front of the web pods (`k8s/https/ingress.yaml`). Plain HTTP on that name is redirected to HTTPS. The certificate takes 15 to 60 minutes to be issued the first time; `kubectl -n snip get managedcertificate snip-cert` shows `Active` when it is ready.
+
+The web service also sends security headers on every response (a content security policy, no framing, no content sniffing, HSTS over HTTPS), limits each visitor to 10 new links a minute, and rejects oversized requests.
 
 After a code change, `.\scripts\deploy.ps1 -ProjectId YOUR_PROJECT_ID -Step build` and then `-Step apply` roll out a new image tag.
 

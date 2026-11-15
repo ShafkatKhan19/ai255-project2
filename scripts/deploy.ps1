@@ -14,6 +14,9 @@ What it does, in order:
 Run one part only with -Step setup | build | apply.
 Add -UseCloudBuild to build the images in Google Cloud instead of with
 Docker Desktop on this PC.
+Add -Domain snip.example.com -DnsZone my-zone to also serve the site over
+HTTPS on that name: reserves an address, points the DNS record at it and
+asks Google for a certificate (issuing it takes 15 to 60 minutes).
 It is safe to run again: anything that already exists is left alone.
 #>
 param(
@@ -21,7 +24,9 @@ param(
     [string]$Region = "us-central1",
     [ValidateSet("all", "setup", "build", "apply")][string]$Step = "all",
     [switch]$UseCloudBuild,
-    [string]$Tag = ""
+    [string]$Tag = "",
+    [string]$Domain = "",
+    [string]$DnsZone = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -105,6 +110,34 @@ function Setup {
     }
 }
 
+# Reserve a fixed public address for the HTTPS load balancer and point the
+# DNS name at it. The certificate can only be issued once the name resolves
+# to this address.
+function SetupHttps {
+    Say "HTTPS address for $Domain"
+    $ip = gcloud compute addresses list --global --filter="name=snip-ip" --format="value(address)"
+    Check "listing addresses"
+    if (-not $ip) {
+        gcloud compute addresses create snip-ip --global
+        Check "reserving the address"
+        $ip = gcloud compute addresses describe snip-ip --global --format="value(address)"
+        Check "reading the address"
+    }
+    Write-Host "snip-ip = $ip"
+    if ($DnsZone) {
+        $existing = gcloud dns record-sets list --zone=$DnsZone --name="$Domain." --type=A --format="value(rrdatas)"
+        Check "listing DNS records"
+        if ($existing) {
+            Write-Host "DNS record already exists: $existing"
+        } else {
+            gcloud dns record-sets create "$Domain." --zone=$DnsZone --type=A --ttl=300 --rrdatas=$ip
+            Check "creating the DNS record"
+        }
+    } else {
+        Write-Host "Create an A record for $Domain pointing at $ip at your DNS provider."
+    }
+}
+
 function Build {
     if (-not $script:Tag) {
         $script:Tag = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -168,6 +201,15 @@ function Apply {
     if (-not $ip) {
         throw "The load balancer has no address yet. Check: kubectl -n $Namespace get service web"
     }
+    if ($Domain) {
+        Say "HTTPS for $Domain"
+        $text = [IO.File]::ReadAllText((Join-Path (Join-Path $source "https") "ingress.yaml"))
+        [IO.File]::WriteAllText((Join-Path $rendered "https-ingress.yaml"), $text.Replace("__DOMAIN__", $Domain))
+        kubectl apply -f (Join-Path $rendered "https-ingress.yaml")
+        Check "kubectl apply (https)"
+        Write-Host "https://$Domain will work once the certificate is issued. Check with:"
+        Write-Host "  kubectl -n $Namespace get managedcertificate snip-cert"
+    }
     Write-Host ""
     Write-Host "Snip is live at http://$ip" -ForegroundColor Green
     Write-Host "Check it with:  py scripts\smoke_test.py http://$ip"
@@ -175,5 +217,6 @@ function Apply {
 
 $script:Tag = $Tag
 if ($Step -eq "all" -or $Step -eq "setup") { Setup }
+if ($Domain -and ($Step -eq "all" -or $Step -eq "setup")) { SetupHttps }
 if ($Step -eq "all" -or $Step -eq "build") { Build }
 if ($Step -eq "all" -or $Step -eq "apply") { Apply }
