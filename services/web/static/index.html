@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snip: AI 255 Project 2</title>
+<style>
+  :root { --cream:#fbf5ec; --ink:#161616; --coral:#ff5a45; --line:#e6dccb; --muted:#6d655a; --card:#fff; --ok:#1c7c4a; --warn:#a85a00; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--cream); color:var(--ink); font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; line-height:1.5; }
+  header { background:var(--ink); color:var(--cream); padding:2rem 1rem 2.2rem; }
+  .wrap { max-width:960px; margin:0 auto; padding:0 1rem; }
+  h1 { margin:0; font-size:clamp(1.8rem,4vw,2.6rem); letter-spacing:-.02em; }
+  h1 span { color:var(--coral); }
+  header p { margin:.4rem 0 0; color:#cfc6b6; max-width:640px; }
+  .flow { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; margin-top:1.1rem; font-size:.85rem; }
+  .flow b { border:1px solid #4a4a4a; border-radius:6px; padding:.25rem .6rem; font-weight:600; }
+  .flow i { color:var(--coral); font-style:normal; }
+  main.wrap { padding:1.5rem 1rem 3rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1.2rem; margin-bottom:1.2rem; }
+  h2 { margin:0 0 .8rem; font-size:1.05rem; }
+  form { display:flex; gap:.6rem; flex-wrap:wrap; }
+  input[type=url] { flex:1 1 320px; padding:.7rem .8rem; border:1px solid var(--line); border-radius:8px; font-size:1rem; }
+  button { background:var(--coral); color:#fff; border:0; border-radius:8px; padding:.7rem 1.2rem; font-size:1rem; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  .msg { margin-top:.7rem; font-size:.92rem; min-height:1.4em; }
+  .msg.ok { color:var(--ok); } .msg.err { color:#b3261e; }
+  table { width:100%; border-collapse:collapse; font-size:.93rem; }
+  th, td { text-align:left; padding:.55rem .4rem; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:.8rem; text-transform:uppercase; letter-spacing:.04em; }
+  td.url { word-break:break-all; color:var(--muted); }
+  td.num, th.num { text-align:right; }
+  a { color:var(--coral); font-weight:600; text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .banner { display:none; background:#fff4e0; border:1px solid #f0cf94; color:var(--warn); border-radius:8px; padding:.6rem .8rem; margin-bottom:.8rem; font-size:.92rem; }
+  .banner.down { background:#fde9e7; border-color:#f3b4ae; color:#b3261e; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:.8rem; }
+  .stat { border:1px solid var(--line); border-radius:10px; padding:.8rem; }
+  .stat small { display:block; color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }
+  .stat div { font-family: ui-monospace, Consolas, monospace; font-size:.9rem; margin-top:.2rem; word-break:break-all; }
+  .pods { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.3rem; }
+  .pod { font-family: ui-monospace, Consolas, monospace; font-size:.8rem; background:var(--cream); border:1px solid var(--line); border-radius:999px; padding:.15rem .6rem; }
+  .chips { display:flex; flex-wrap:wrap; gap:.6rem; }
+  .chip { display:flex; align-items:center; gap:.5rem; border:1px solid var(--line); border-radius:10px; padding:.55rem .8rem; min-width:150px; }
+  .chip b { font-size:.95rem; } .chip small { color:var(--muted); display:block; font-size:.78rem; }
+  .dot { width:.7rem; height:.7rem; border-radius:50%; background:#c9c2b6; flex:none; }
+  .dot.ok { background:var(--ok); } .dot.down { background:#d93025; }
+  footer { color:var(--muted); font-size:.85rem; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Snip<span>.</span></h1>
+    <p>A link shortener made of three containerized services on Google Kubernetes Engine, with Firestore as the managed datastore. AI 255 Project 2.</p>
+    <div class="flow"><b>browser</b><i>&rarr;</i><b>web</b><i>&rarr;</i><b>links</b><i>+</i><b>stats</b><i>&rarr;</i><b>Firestore</b></div>
+  </div>
+</header>
+<main class="wrap">
+  <div class="card">
+    <h2>Shorten a link</h2>
+    <form id="form">
+      <input id="url" type="url" placeholder="https://example.com/a/very/long/address" required>
+      <button id="go" type="submit">Shorten</button>
+    </form>
+    <div id="msg" class="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>Links</h2>
+    <div id="statsBanner" class="banner">The stats service is not answering. Links still work; click counts are hidden until it is back.</div>
+    <div id="linksBanner" class="banner down">The links service is not answering. Trying again every few seconds.</div>
+    <table>
+      <thead><tr><th>Short link</th><th>Goes to</th><th class="num">Clicks</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="3">Loading&hellip;</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Service status</h2>
+    <div class="chips">
+      <div class="chip"><span class="dot" id="dot-web"></span><div><b>web</b><small id="txt-web">checking</small></div></div>
+      <div class="chip"><span class="dot" id="dot-links"></span><div><b>links</b><small id="txt-links">checking</small></div></div>
+      <div class="chip"><span class="dot" id="dot-stats"></span><div><b>stats</b><small id="txt-stats">checking</small></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>What answered this page</h2>
+    <div class="grid">
+      <div class="stat"><small>Last web pod</small><div id="pod">-</div></div>
+      <div class="stat"><small>Last response time</small><div id="ms">-</div></div>
+      <div class="stat"><small>Web pods seen so far</small><div class="pods" id="pods">-</div></div>
+    </div>
+  </div>
+  <footer>The page refreshes every 5 seconds while this tab is visible. Each refresh can be answered by a different web pod, which is the load balancer at work.</footer>
+</main>
+<script>
+const rows = document.getElementById('rows');
+const msg = document.getElementById('msg');
+const seen = new Set();
+
+function cell(text, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.textContent = text;
+  return td;
+}
+
+function notePod(name, ms) {
+  if (!name) return;
+  seen.add(name);
+  document.getElementById('pod').textContent = name;
+  document.getElementById('ms').textContent = ms + ' ms';
+  const box = document.getElementById('pods');
+  box.textContent = '';
+  for (const p of seen) {
+    const s = document.createElement('span');
+    s.className = 'pod';
+    s.textContent = p;
+    box.appendChild(s);
+  }
+}
+
+function showState(name, state, text) {
+  document.getElementById('dot-' + name).className = 'dot ' + state;
+  document.getElementById('txt-' + name).textContent = text;
+}
+
+async function refreshStatus() {
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error('bad status');
+    const data = await res.json();
+    showState('web', 'ok', 'answering');
+    showState('links', data.links, data.links === 'ok' ? 'ready' : 'not answering');
+    showState('stats', data.stats, data.stats === 'ok' ? 'ready' : 'not answering');
+  } catch (e) {
+    showState('web', 'down', 'not answering');
+    showState('links', '', 'unknown');
+    showState('stats', '', 'unknown');
+  }
+}
+
+async function refresh() {
+  const started = performance.now();
+  try {
+    const res = await fetch('/api/links', { cache: 'no-store' });
+    notePod(res.headers.get('X-Served-By'), Math.round(performance.now() - started));
+    if (!res.ok) throw new Error('links down');
+    const data = await res.json();
+    document.getElementById('linksBanner').style.display = 'none';
+    document.getElementById('statsBanner').style.display = data.stats_available ? 'none' : 'block';
+    rows.textContent = '';
+    if (data.links.length === 0) {
+      const tr = document.createElement('tr');
+      const td = cell('No links yet. Make the first one above.');
+      td.colSpan = 3;
+      tr.appendChild(td);
+      rows.appendChild(tr);
+    }
+    for (const link of data.links) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      const a = document.createElement('a');
+      a.href = '/r/' + link.code;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = '/r/' + link.code;
+      td.appendChild(a);
+      tr.appendChild(td);
+      tr.appendChild(cell(link.url, 'url'));
+      tr.appendChild(cell(link.clicks === null ? '?' : link.clicks, 'num'));
+      rows.appendChild(tr);
+    }
+  } catch (e) {
+    document.getElementById('linksBanner').style.display = 'block';
+  }
+}
+
+document.getElementById('form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = document.getElementById('go');
+  button.disabled = true;
+  msg.className = 'msg';
+  msg.textContent = '';
+  try {
+    const res = await fetch('/api/links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: document.getElementById('url').value })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      msg.className = 'msg ok';
+      msg.textContent = 'Created ' + data.short_url;
+      document.getElementById('url').value = '';
+      refresh();
+    } else {
+      msg.className = 'msg err';
+      msg.textContent = data.detail || 'Something went wrong.';
+    }
+  } catch (e) {
+    msg.className = 'msg err';
+    msg.textContent = 'Could not reach the server.';
+  }
+  button.disabled = false;
+});
+
+function tick() {
+  // A hidden tab does not refresh, so a forgotten tab does not keep
+  // reading from the datastore all day.
+  if (document.hidden) return;
+  refresh();
+  refreshStatus();
+}
+
+tick();
+setInterval(tick, 5000);
+document.addEventListener('visibilitychange', tick);
+</script>
+</body>
+</html>
