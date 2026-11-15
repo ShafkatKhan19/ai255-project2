@@ -5,7 +5,7 @@ to the two internal services.
                  -> stats  (count clicks)
 
 Endpoints
-  GET  /              the page
+  GET  /              the page (its script and styles are under /static)
   GET  /api/links     list of links with click counts
   POST /api/links     create a short link
   GET  /r/{code}      redirect to the original address and count the click
@@ -15,6 +15,8 @@ Endpoints
   GET  /readyz        readiness
 """
 import asyncio
+import collections
+import json
 import logging
 import os
 import re
@@ -26,6 +28,7 @@ from pathlib import Path
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s web %(levelname)s %(message)s")
 log = logging.getLogger("web")
@@ -42,9 +45,32 @@ STATS_TIMEOUT = 1.0
 
 CODE_PATTERN = re.compile(r"^[a-z0-9]{1,32}$")
 POD = socket.gethostname()
-INDEX = Path(__file__).parent / "static" / "index.html"
+STATIC = Path(__file__).parent / "static"
+INDEX = STATIC / "index.html"
+
+# Sent with every response. The page loads its script and styles only from
+# this site, so text injected into the page cannot run as code, and the
+# page cannot be shown inside a frame on another site.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; img-src 'self' data:; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+# Limits on creating links, per visitor and per web pod. Each pod counts
+# on its own, so with several pods the real limit is a few times higher.
+CREATE_LIMIT = 10        # new links ...
+CREATE_WINDOW = 60.0     # ... per this many seconds
+MAX_BODY_BYTES = 4096
+recent_creates = {}      # visitor address -> times of their recent creates
 
 app = FastAPI(title="web")
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 # One shared client, so connections to links and stats are reused. Idle
 # connections are dropped after 5 seconds: a Kubernetes Service picks a pod
@@ -65,6 +91,11 @@ async def tag_and_log(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Served-By"] = POD
     response.headers["X-Request-ID"] = request.state.request_id
+    for name, value in SECURITY_HEADERS.items():
+        response.headers[name] = value
+    if scheme_of(request) == "https":
+        # Tell the browser to use HTTPS for this host for the next day.
+        response.headers["Strict-Transport-Security"] = "max-age=86400"
     if request.url.path not in ("/healthz", "/readyz", "/api/whoami"):
         log.info(
             "%s %s -> %s in %.0f ms request_id=%s",
@@ -72,6 +103,48 @@ async def tag_and_log(request: Request, call_next):
             (time.perf_counter() - started) * 1000, request.state.request_id,
         )
     return response
+
+
+def scheme_of(request):
+    """'https' when the visitor reached the load balancer over HTTPS.
+
+    The HTTPS load balancer decrypts the request and passes it on as plain
+    HTTP, with the original scheme in the X-Forwarded-Proto header.
+    """
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+    return forwarded if forwarded in ("http", "https") else request.url.scheme
+
+
+def public_base(request):
+    """The address the visitor used, for building short links."""
+    return f"{scheme_of(request)}://{request.headers.get('host', request.url.netloc)}/"
+
+
+def visitor_of(request):
+    """The visitor's address, for rate limiting.
+
+    Google's HTTPS load balancer adds "<visitor>, <load balancer>" to the
+    end of X-Forwarded-For, so the visitor is second from the end. Anything
+    before that was sent by the visitor and cannot be trusted.
+    """
+    parts = [part.strip() for part in request.headers.get("x-forwarded-for", "").split(",")]
+    if len(parts) >= 2:
+        return parts[-2]
+    return request.client.host if request.client else "unknown"
+
+
+def allow_create(visitor):
+    """True if this visitor may create another link right now."""
+    now = time.monotonic()
+    if len(recent_creates) > 10000:
+        recent_creates.clear()  # keep memory bounded
+    times = recent_creates.setdefault(visitor, collections.deque())
+    while times and now - times[0] > CREATE_WINDOW:
+        times.popleft()
+    if len(times) >= CREATE_LIMIT:
+        return False
+    times.append(now)
+    return True
 
 
 async def call(method, url, timeout, request_id, retries=0, **kwargs):
@@ -175,7 +248,7 @@ async def list_links(request: Request):
             log.warning("stats unavailable: %s", type(error).__name__)
             stats_available = False
 
-    base = str(request.base_url)
+    base = public_base(request)
     for link in links:
         link["short_url"] = f"{base}r/{link['code']}"
         link["clicks"] = counts.get(link["code"], 0) if stats_available else None
@@ -184,9 +257,18 @@ async def list_links(request: Request):
 
 @app.post("/api/links", status_code=201)
 async def create_link(request: Request):
+    if not allow_create(visitor_of(request)):
+        raise HTTPException(
+            status_code=429,
+            detail="too many new links, please wait a minute",
+            headers={"Retry-After": str(int(CREATE_WINDOW))},
+        )
+    raw = await request.body()
+    if len(raw) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="request too large")
     try:
-        body = await request.json()
-    except Exception:
+        body = json.loads(raw)
+    except ValueError:
         raise HTTPException(status_code=400, detail="body must be JSON")
     try:
         # No retry here: sending a create twice could make two links.
@@ -200,7 +282,7 @@ async def create_link(request: Request):
     if response.status_code != 201:
         raise links_down(f"status {response.status_code}")
     link = response.json()
-    link["short_url"] = f"{request.base_url}r/{link['code']}"
+    link["short_url"] = f"{public_base(request)}r/{link['code']}"
     return link
 
 

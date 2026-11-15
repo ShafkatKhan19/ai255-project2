@@ -215,3 +215,70 @@ def test_only_listed_codes_are_asked_from_stats():
     empty = System()
     empty.get("/api/links")
     assert not [call for call in empty.wiring.calls if call[1] == "stats"]
+
+
+def test_security_headers_on_every_response():
+    system = System()
+    for path in ["/", "/api/links", "/static/app.js", "/r/nothere"]:
+        headers = system.get(path).headers
+        assert "default-src 'self'" in headers["content-security-policy"]
+        assert headers["x-content-type-options"] == "nosniff"
+        assert headers["x-frame-options"] == "DENY"
+        assert "strict-transport-security" not in headers  # plain HTTP here
+
+
+def test_https_requests_get_hsts_and_https_short_links():
+    system = System()
+    https = {"X-Forwarded-Proto": "https", "Host": "snip.example.test"}
+    created = asyncio.run(system.browser.post(
+        "/api/links", json={"url": "https://example.com/a"}, headers=https))
+    assert created.headers["strict-transport-security"] == "max-age=86400"
+    assert created.json()["short_url"].startswith("https://snip.example.test/r/")
+
+
+def test_page_script_and_styles_are_served():
+    system = System()
+    assert "text/css" in system.get("/static/style.css").headers["content-type"]
+    assert "javascript" in system.get("/static/app.js").headers["content-type"]
+    # No inline script or style in the page: the security policy forbids it.
+    page = system.get("/").text
+    assert "<style" not in page and "<script>" not in page
+
+
+def test_creating_links_is_rate_limited_per_visitor():
+    system = System()
+    def create(visitor):
+        headers = {"X-Forwarded-For": f"{visitor}, 203.0.113.1"}
+        return asyncio.run(system.browser.post(
+            "/api/links", json={"url": "https://example.com/a"}, headers=headers))
+
+    for _ in range(system.web.CREATE_LIMIT):
+        assert create("198.51.100.7").status_code == 201
+    blocked = create("198.51.100.7")
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"] == "60"
+    # A different visitor is not affected, and reading is never limited.
+    assert create("198.51.100.8").status_code == 201
+    assert system.get("/api/links").status_code == 200
+
+
+def test_spoofed_forwarded_address_does_not_dodge_the_limit():
+    system = System()
+    def create(fake):
+        # The visitor puts a made-up address first; the load balancer still
+        # appends the real one.
+        headers = {"X-Forwarded-For": f"{fake}, 198.51.100.7, 203.0.113.1"}
+        return asyncio.run(system.browser.post(
+            "/api/links", json={"url": "https://example.com/a"}, headers=headers))
+
+    for i in range(system.web.CREATE_LIMIT):
+        assert create(f"10.0.0.{i}").status_code == 201
+    assert create("10.0.0.99").status_code == 429
+
+
+def test_oversized_and_malformed_bodies_are_rejected():
+    system = System()
+    big = asyncio.run(system.browser.post("/api/links", content=b"x" * 5000))
+    assert big.status_code == 413
+    bad = asyncio.run(system.browser.post("/api/links", content=b"not json"))
+    assert bad.status_code == 400
