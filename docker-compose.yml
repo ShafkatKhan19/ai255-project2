@@ -1,0 +1,39 @@
+# Runs the whole system on one machine for development:
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# The Firestore emulator stands in for the managed datastore, so nothing
+# here touches Google Cloud. Data is lost when the emulator stops.
+services:
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud emulators firestore start --host-port=0.0.0.0:8085
+
+  links:
+    build: ./services/links
+    environment:
+      STORE_BACKEND: firestore
+      FIRESTORE_EMULATOR_HOST: firestore:8085
+      GOOGLE_CLOUD_PROJECT: snip-local
+    depends_on:
+      - firestore
+
+  stats:
+    build: ./services/stats
+    environment:
+      STORE_BACKEND: firestore
+      FIRESTORE_EMULATOR_HOST: firestore:8085
+      GOOGLE_CLOUD_PROJECT: snip-local
+    depends_on:
+      - firestore
+
+  web:
+    build: ./services/web
+    environment:
+      LINKS_URL: http://links:8080
+      STATS_URL: http://stats:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      - links
+      - stats

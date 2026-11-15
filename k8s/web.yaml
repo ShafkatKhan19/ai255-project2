@@ -1,0 +1,134 @@
+# web service: the only one reachable from the internet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: snip
+  labels:
+    app: web
+spec:
+  # No "replicas" here on purpose: the autoscaler below owns that number.
+  selector:
+    matchLabels:
+      app: web
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      serviceAccountName: snip-web
+      automountServiceAccountToken: false
+      # Same rule as links and stats: pods must be spread over zones.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: web
+      containers:
+        - name: web
+          image: __REGISTRY__/web:__TAG__
+          ports:
+            - containerPort: 8080
+          env:
+            # Kubernetes DNS turns these names into the Service addresses.
+            - name: LINKS_URL
+              value: http://links:8080
+            - name: STATS_URL
+              value: http://stats:8080
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # web is ready as soon as it runs. It does not check links or
+          # stats here; see the comment in services/web/app.py.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Public entry point. GKE creates a Google Cloud load balancer with an
+# external IP address that sends port 80 to the web pods on 8080.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: snip
+spec:
+  type: LoadBalancer
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web
+  namespace: snip
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: snip
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: web

@@ -1,0 +1,24 @@
+# links and stats only accept traffic from the web pods. Nothing else in
+# the cluster can call them directly. (Health checks come from the node
+# itself and are always allowed.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backends-only-from-web
+  namespace: snip
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["links", "stats"]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: web
+      ports:
+        - protocol: TCP
+          port: 8080

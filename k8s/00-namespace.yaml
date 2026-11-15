@@ -1,0 +1,24 @@
+# Everything for this project lives in its own namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: snip
+---
+# Identity for the two services that use Firestore (links and stats).
+# deploy.ps1 grants this account the Firestore role through Workload
+# Identity, so no key file is ever stored in the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: snip-data
+  namespace: snip
+---
+# Identity for the web service. It has no Google Cloud permissions at all,
+# so even if the public service is broken into, Firestore cannot be reached
+# with its identity.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: snip-web
+  namespace: snip
+automountServiceAccountToken: false

@@ -1,0 +1,143 @@
+# links service: Deployment (the pods), Service (stable internal address),
+# HorizontalPodAutoscaler (how many pods) and PodDisruptionBudget.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: links
+  namespace: snip
+  labels:
+    app: links
+spec:
+  # No "replicas" here on purpose: the autoscaler below owns that number.
+  selector:
+    matchLabels:
+      app: links
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # start one new pod first...
+      maxUnavailable: 0  # ...and never drop below the current count
+  template:
+    metadata:
+      labels:
+        app: links
+    spec:
+      serviceAccountName: snip-data
+      # The pods must be spread evenly over zones, so losing one node or
+      # one zone never takes out every copy. This is a hard rule
+      # (DoNotSchedule): as a preference (ScheduleAnyway) the first
+      # deployment put all six pods on a single node.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: links
+      containers:
+        - name: links
+          image: __REGISTRY__/links:__TAG__
+          ports:
+            - containerPort: 8080
+          env:
+            - name: STORE_BACKEND
+              value: firestore
+            - name: GOOGLE_CLOUD_PROJECT
+              value: __PROJECT__
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+          # Liveness: is the process answering at all? If this fails three
+          # times in a row, Kubernetes restarts the container.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Readiness: can this pod reach Firestore right now? If not, the
+          # pod stays running but is taken out of the Service until it can.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              # Wait a few seconds before shutting down so the Service
+              # stops sending new requests to this pod first.
+              exec:
+                command: ["sleep", "5"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Internal only (ClusterIP). Other pods reach it as http://links:8080.
+apiVersion: v1
+kind: Service
+metadata:
+  name: links
+  namespace: snip
+spec:
+  type: ClusterIP
+  selector:
+    app: links
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# Horizontal scaling: keep average CPU near 60% of the request by adding
+# or removing pods, between 2 and 6.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: links
+  namespace: snip
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: links
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120
+---
+# During node upgrades or other planned maintenance, never take down the
+# last running pod of this service.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: links
+  namespace: snip
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: links
