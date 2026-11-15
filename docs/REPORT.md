@@ -2,7 +2,7 @@
 
 Shafkat Khalek Khan. AI 255 Cloud Computing Concepts, Prof. Yair Chaya, Fall 2026.
 
-**Live endpoint:** {{URL}}
+**Live endpoint:** {{URL}} (the first address, http://34.171.202.5, also still works)
 **Provider:** Google Cloud, region us-central1. **Repository:** https://github.com/ShafkatKhan19/ai255-project2
 
 ## 1. Summary
@@ -23,7 +23,7 @@ Snip is a link shortener. You paste a long address, get a short one, and the pag
 
 ![Architecture](architecture.png)
 
-A request from the browser reaches the Google Cloud load balancer, which sends it to one of the `web` pods. `web` is the only public service. For a click on a short link, `web` asks `links` for the original address, sends the redirect, and then tells `stats` to add one click. `links` and `stats` are internal: they have ClusterIP Services, so they have no address outside the cluster, and a NetworkPolicy only lets the `web` pods call them.
+A request from the browser reaches a Google Cloud load balancer, which sends it to one of the `web` pods. There are two: the HTTPS load balancer on the project's domain name, which holds the certificate, and the plain HTTP one on a bare IP address that I deployed first and kept so the experiments in Section 7 stay reproducible. `web` is the only public service. For a click on a short link, `web` asks `links` for the original address, sends the redirect, and then tells `stats` to add one click. `links` and `stats` are internal: they have ClusterIP Services, so they have no address outside the cluster, and a NetworkPolicy only lets the `web` pods call them.
 
 | Service | Job | Talks to | Stores |
 |---|---|---|---|
@@ -100,6 +100,9 @@ Actual use when idle, from `kubectl top pods`:
 
 ## 5. Security
 
+- **HTTPS.** The site is served at a domain name through a Google HTTPS load balancer with a Google-managed certificate, which Google renews by itself. Plain HTTP on that name is redirected to HTTPS, and responses over HTTPS carry an HSTS header. The parent domain only allowed Let's Encrypt to issue certificates (a CAA record from Project 1), so I added a CAA record for this name that also allows Google's certificate authority.
+- **Security headers.** Every response carries a content security policy that only allows scripts and styles from the site itself, so text injected into the page cannot run as code. The page has no inline script for that reason. Other headers stop the page being shown in a frame on another site and stop browsers guessing content types.
+- **Rate limit.** Each visitor can create 10 links a minute per web pod; after that web answers 429 with `Retry-After`. Requests over 4 KB are rejected. The visitor's address is taken from the entry the load balancer adds to `X-Forwarded-For`, not from what the visitor sends, and there is a test that a made-up address does not get around the limit.
 - **No keys in the cluster.** `links` and `stats` run as the Kubernetes service account `snip-data`. Through Workload Identity that account has one IAM role, `roles/datastore.user`. There is no key file in the image or in a Secret.
 - **The public service has no cloud access.** `web` runs as `snip-web`, which has no IAM role, and its service account token is not mounted.
 - **Network.** Only `web` is exposed. A NetworkPolicy blocks everything except `web` from calling `links` and `stats`.
@@ -134,7 +137,7 @@ web reuses connections to links and stats but drops idle ones after 5 seconds. A
 | Firestore cannot be reached or is slow | Every Firestore call is limited to 3 s and becomes a 503. The readiness probe fails, so the pod is removed from the Service. Liveness stays green, so pods are not restarted for something a restart cannot fix. | Explicit time limit on every call (see 6.5), readiness probe, 503 passed to the user by web. Tested against an unreachable Firestore address. |
 | Two requests pick the same random code | The second create fails inside Firestore (`create` refuses to overwrite) and links picks a new code, up to 5 times. | Firestore's create-if-absent. Tested. |
 | web times out after links already saved the link | The user sees an error, tries again, and gets a second short link for the same address. The first one is left unused. | Nothing. This is a known weakness: creating is not idempotent. A fix is for the browser to send a request ID that links stores with the link. |
-| Someone floods the service with new links | Firestore writes cost money and the list fills with junk. | Nothing in this version. There is no login and no rate limit. |
+| Someone floods the service with new links | Firestore writes cost money and the list fills with junk. | web limits each visitor to 10 new links a minute per pod (429 after that). It slows one visitor down; it does not stop many visitors at once, and there is no login. Tested. |
 | Permission is removed from `snip-data` | Same as Firestore being down: 503 and pods not ready. | Readiness probe makes it visible quickly. |
 
 ### 6.3 stats
@@ -170,9 +173,9 @@ Before deploying I ran the three services as separate processes on one machine a
 - **stats stopped.** Redirects still returned 307 in about 3 ms and the list returned `stats_available: false`.
 - **links stopped for 2 seconds, then started again.** Of 40 requests in 8 seconds, 29 returned 200 and 11 returned 503. All failures fell between t=3.2 s and t=5.2 s, the time links was down. No request went unanswered, and web recovered without a restart.
 
-The same cases, plus the datastore outage in 6.5, run automatically in `tests/` (30 tests). These local runs used an in-memory store in place of Firestore, so they test the services and how they depend on each other, not Firestore itself.
+The same cases, plus the datastore outage in 6.5 and the security checks in Section 5, run automatically in `tests/` (36 tests). These local runs used an in-memory store in place of Firestore, so they test the services and how they depend on each other, not Firestore itself.
 
-The experiments below were run on the live cluster on 15 November 2026 with `scripts/experiments.ps1`, which runs each one and saves the output into `evidence/`. Everything shown is copied from those files.
+The experiments below were run on the live cluster on 15 November 2026 with `scripts/experiments.ps1`, which runs each one and saves the output into `evidence/`. Everything shown is copied from those files. They were run against the first address (http://34.171.202.5), before HTTPS was added; the same end-to-end check passes on the HTTPS address.
 
 ### 7.1 Kill a pod
 
@@ -255,20 +258,21 @@ GKE Autopilot bills for what the pods request, not for nodes. At the minimum siz
 | Pod CPU | 1.5 vCPU x $0.0445 per hour x 24 | $1.60 |
 | Pod memory | 3 GiB x $0.0049225 per hour x 24 | $0.35 |
 | Cluster fee | $0.10 per hour, covered by the GKE free tier credit for one cluster | $0.00 |
-| Load balancer | one forwarding rule, about $0.025 per hour | $0.60 |
+| Load balancer (HTTP, first address) | one forwarding rule, about $0.025 per hour | $0.60 |
+| HTTPS load balancer | two more forwarding rules and one reserved address; at most 2 x $0.025 + $0.005 per hour | up to $1.32 |
 | Firestore | see below | about $0.00 |
-| **Total** | | **about $2.55** |
+| **Total** | | **about $2.55 to $3.90** |
 
-At the maximum of 6 pods per service the total is about $6.50 a day.
+At the maximum of 6 pods per service the pod cost triples, for a total of about $6.50 to $7.80 a day.
 
 Firestore gives 50,000 free document reads and 20,000 free writes a day. Two things read from it even with no visitors: the readiness probes (4 backend pods, one read every 20 seconds, about 17,000 reads a day) and any browser tab that has the page open (with 10 links, about 22 reads every 5 seconds, or 16,000 an hour). So about two hours with the page open uses up the free reads for the day. After that, reads are billed at a few cents per 100,000, so a full day with the page open costs well under a dollar. I reduced this in two ways: the page stops refreshing when its tab is hidden, and stats only reads the counters for the links being shown instead of all of them. The biggest saving available is lowering the requests. When idle each pod uses about 3m of CPU and 40 to 75 Mi of memory (Section 4), against requests of 250m and 512 Mi. Requests of 100m and 128 Mi would cut the pod cost by more than half, at the price of the autoscaler reacting to smaller amounts of traffic.
 
 ## 9. What I would change
 
-- Add HTTPS. Project 1 had TLS; this one is plain HTTP on an IP address. On GKE this means a Gateway with a Google-managed certificate and a DNS name.
+- Remove the plain HTTP address once it is no longer needed, so HTTPS is the only way in.
 - Put clicks on a queue (Pub/Sub) so they survive a stats outage and so one popular link cannot overload a single counter document.
 - Make link creation idempotent with a request ID.
-- Add rate limiting on creating links.
+- Share the rate limit between pods (for example in Redis). Now each web pod counts on its own.
 - Cache the link list in web for a couple of seconds. It would cut Firestore reads a lot under many viewers, but with several web pods a new link could be missing from the list for a moment, so I left it out for now.
 - Scale on requests per second instead of CPU, which reacts sooner for this kind of service.
 - Move everything in `scripts/deploy.ps1` into Terraform and a pipeline. That is Project 3.

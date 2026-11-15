@@ -11,7 +11,7 @@ digraph snip {
   subgraph cluster_gcp {
     label="Google Cloud project"; labelloc=t; fontsize=13; style="rounded,dashed"; color="#6d655a"; fontcolor="#6d655a";
 
-    lb [label="External load balancer\nService type LoadBalancer\nport 80", fillcolor="#ffe3dd", color="#ff5a45"];
+    lb [label="HTTPS load balancer (Ingress)\nGoogle-managed certificate\nHTTP redirects to HTTPS\n\n+ plain HTTP load balancer\non the first address", fillcolor="#ffe3dd", color="#ff5a45"];
 
     subgraph cluster_gke {
       label="GKE Autopilot cluster  /  namespace snip"; labelloc=t; fontsize=13; style="rounded,filled"; fillcolor="#f4ead9"; color="#161616"; fontcolor="#161616";
@@ -26,7 +26,7 @@ digraph snip {
     iam [label="IAM (Workload Identity)\nsnip-data -> roles/datastore.user\nsnip-web  -> no cloud access", shape=note, fillcolor="#fff8d6", fontsize=10];
   }
 
-  user -> lb    [label="HTTP", color="#ff5a45", penwidth=1.8];
+  user -> lb    [label="HTTPS", color="#ff5a45", penwidth=1.8];
   lb -> web     [color="#ff5a45", penwidth=1.8];
   web -> links  [label="http://links:8080\n4 s timeout, GET retried once"];
   web -> stats  [label="http://stats:8080\n1 s timeout, best effort"];
